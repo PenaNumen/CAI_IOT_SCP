@@ -1,0 +1,314 @@
+// Libraries
+#include <DHT.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+
+#define OLED_RESET 0  // GPIO0
+Adafruit_SSD1306 display(OLED_RESET);
+ 
+#define NUMFLAKES 10
+#define XPOS 0
+#define YPOS 1
+#define DELTAY 2
+ 
+#define LOGO16_GLCD_HEIGHT 16
+#define LOGO16_GLCD_WIDTH  16
+
+#define DHTTYPE DHT11 
+#define DHTPIN 2
+ 
+#define LED1 16
+#define BUZZ D6
+
+// ========== start configuration ==========
+// WiFi configuration
+char* ssid1 = "<YOUR SSID>";
+char* password1 = "<YOUR PASS>";
+char* ssid2 = "<YOUR SSID>";
+char* password2 = "<YOUR PASS>";
+char* ssid;
+char* password;
+
+// WiFi Status
+String WifiStatus;
+const String WifiOn  = "Connected!";
+const String WifiOff = "Disconnected!";
+const String WifiTry = "Connecting...";
+
+// Timers auxiliar variables
+long now = millis();
+long lastMeasure = 0;
+
+WiFiClientSecure client;
+
+// SAP SCP specific configuration
+const char* host = "iotmmsp999999trial.hanatrial.ondemand.com";
+String device_id = "<YOUR DEVICE ID>";
+String message_type_id = "<YOUR MESSAGE TYPE ID>";
+String oauth_token="<YOUR OAUTH TOKEN GENERATED IN IOT SERVICE>";
+
+// Sensors and Buttons
+const int LDR = 0;
+int l = 0;
+float h;
+float t;
+float h1;
+float t1;
+
+int count_sec_wifi = 0;
+int count_sec_read = 0;
+int count_sec_send = 0;
+int count_sec      = 0;
+int i = 0;
+
+DHT dht(DHTPIN, DHTTYPE);
+
+String url = "https://iotmmsp999999trial.hanatrial.ondemand.com/com.sap.iotservices.mms/v1/api/http/data/" + device_id;
+const int httpsPort = 443; //HTTP port
+
+void setup() {
+  
+  Serial.begin(115200);
+  delay(10);
+  dht.begin();
+
+  pinMode(LED1, OUTPUT);
+
+  Display_Ini_OLED();
+  
+  Wire.begin(9);
+
+  //Conectar ao WiFi
+  Wifi_connect(ssid1,password1);
+  if (WiFi.status() != WL_CONNECTED) {
+     Wifi_connect(ssid2,password2);
+  }
+
+  display.clearDisplay();
+}
+
+void loop() {
+
+  now = millis();
+  // Publicar dados de humidade e temperatura a cada X segundos
+  if (now - lastMeasure > 10000) {
+    lastMeasure = now;
+
+    count_sec_read = 0;
+    while(count_sec_read < 5){
+      count_sec_read++;
+      
+      l = analogRead(LDR);
+  
+    //Verifica se o WiFi está ativo
+      if (WiFi.status() != WL_CONNECTED) {
+        WifiStatus = WifiOff;
+        digitalWrite(LED1, LOW);
+        count_sec++;
+        if (count_sec == 30) {
+          count_sec = 0;
+          Wifi_connect(ssid,password);
+        }
+      }
+  
+    //Exibir dados no display OLED
+      Display_Data();
+    
+    //Imprimir dados dos sensores na porta serial
+      Print_Sensors_Data_serial();
+  
+    }
+  
+    h = dht.readHumidity();
+    t = dht.readTemperature();  
+    
+    /*float hx = dht.readHumidity();
+    float tx = dht.readTemperature();  
+  
+    float hic = dht.computeHeatIndex(tx, hx, false);
+    static char temperatureTemp[7];
+    dtostrf(hic, 6, 2, temperatureTemp);
+  
+    static char humidityTemp[7];
+    dtostrf(hx, 6, 2, humidityTemp);*/
+  
+    //Send Data to HCP 
+    if (
+        (WiFi.status() == WL_CONNECTED) &&
+        (!isnan(t) && !isnan(h))){
+      
+      Send_SCP_Data();
+               
+    }
+  
+    count_sec_wifi++;
+    count_sec_send++;
+
+  }
+  
+}
+
+void Send_SCP_Data(){
+
+  //Connect to HCP
+  Serial.print("connecting to ");
+  Serial.println(host);
+  if (!client.connect(host, httpsPort)) {
+    Serial.println("connection failed");
+    return;
+  }
+  else {
+    
+    String post_payload = "{\"mode\":\"sync\", \"messageType\":\"" + message_type_id + "\", \"messages\":" + 
+                        "[{\"temperature\":"+t+","+
+                        " \"humidity\":"+h+","+
+                        " \"luminosity\":"+l+"}]}";
+                        
+    Serial.print("requesting URL: ");
+    Serial.println(url);
+    
+    // using HTTP/1.0 enforces a non-chunked response
+    client.print(String("POST ") + url + " HTTP/1.0\r\n" +
+                 "Host: " + host + "\r\n" +
+                 "Content-Type: application/json;charset=utf-8\r\n" +
+                 "Authorization: Bearer " + oauth_token + "\r\n" +
+                 "Content-Length: " + post_payload.length() + "\r\n\r\n" +
+                 post_payload + "\r\n\r\n");
+               
+    Serial.println("Enviou");
+    Serial.println("reply was:");
+    Serial.println("==========");
+    while (client.connected()) {
+      String line = client.readStringUntil('\n');
+      Serial.println(line);
+    }
+    Serial.println("==========");
+    Serial.println("closing connection");
+  }
+  
+} 
+
+void Print_Sensors_Data_serial(){
+
+  // Temperature
+  Serial.print("Temperature: ");
+  Serial.print(t);
+  Serial.print("c / ");
+
+  //Humidity
+  Serial.print("Humidity: ");
+  Serial.print(h);
+  Serial.print(" % / ");
+
+  //Light
+  Serial.print("Lumi: ");
+  Serial.println(l);
+  
+}
+
+void Display_Data(){
+
+   
+//  if (BotaoPress == 0){
+    if (!isnan(t) && !isnan(h)){
+      t1 = t;
+      h1 = h;
+    }
+    display.clearDisplay();
+    display.setCursor(0,0);
+    //NumenIoT
+    display.println("       NumenIoT");
+    //Temperature
+    display.print("Temp: ");
+    display.print(t1);
+    display.println("c");
+    //Humidity
+    display.print("Humi: ");
+    display.print(h1);
+    display.println(" %");
+    //Light
+    display.print("Lumi: ");
+    display.println(l);
+    
+    display.display();  
+}
+
+void Wifi_connect(char* p_ssid, char* p_pass){
+
+  Serial.print("Connecting to:");
+  Serial.println(ssid);
+
+  // Clear the buffer.
+  display.clearDisplay();
+ 
+  // text display tests
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0,0);
+  display.println("Connecting to:");
+  display.println(p_ssid);
+  display.display();
+  
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.begin(p_ssid, p_pass);
+
+  int x = 0;
+  while (WiFi.status() != WL_CONNECTED) {
+    x++;
+    digitalWrite(LED1, LOW);
+    delay(300);
+    Serial.print(".");
+    display.print(".");
+    display.display();
+    digitalWrite(LED1, HIGH);
+    delay(200);
+    if (x == 30) {
+      return;
+    }
+  }
+
+  ssid = p_ssid;
+  password = p_pass;
+
+  // Clear the buffer.
+  display.clearDisplay();
+  display.setCursor(0,0);
+  
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  display.println("WiFi connected!");
+  digitalWrite(LED1, HIGH);
+  WifiStatus = WifiOn;
+
+  // Print the IP address
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+  display.print("IP: ");
+  display.println(WiFi.localIP());
+
+  display.display();
+  delay(1500);  
+}
+
+void Display_Ini_OLED() {
+  // by default, we'll generate the high voltage from the 3.3v line internally! (neat!)
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3C (for the 64x48)
+  // init done
+
+  // Clear the buffer.
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(WHITE);
+  display.setCursor(0,0);
+  display.println("        Numen");
+  display.setTextSize(2);
+  display.println("     IoT");
+  
+  display.display();
+  delay(3500);
+}
